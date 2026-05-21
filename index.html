@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teleturniej - System Buzzerów</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #121214;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+        }
+        #network-status {
+            font-size: 14px;
+            padding: 8px 15px;
+            background: #202024;
+            border-radius: 20px;
+            margin-bottom: 20px;
+            display: inline-block;
+            border: 1px solid #333;
+        }
+        h1 { color: #00e676; margin-bottom: 30px; }
+        input, button {
+            width: 100%;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: none;
+            font-size: 18px;
+            box-sizing: border-box;
+        }
+        input { background: #202024; color: white; text-align: center; }
+        
+        /* Wielki przycisk gracza */
+        .buzzer {
+            background: #555555;
+            color: white;
+            font-size: 32px;
+            font-weight: bold;
+            height: 220px;
+            width: 220px;
+            border-radius: 50%;
+            cursor: pointer;
+            margin: 20px auto;
+            display: block;
+            box-shadow: 0 10px 0 #333, 0 15px 20px rgba(0,0,0,0.5);
+            transition: all 0.05s ease;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .buzzer.active-now {
+            background: #ff1744 !important;
+            box-shadow: 0 10px 0 #b2102f, 0 15px 20px rgba(0,0,0,0.5) !important;
+        }
+        .buzzer:active:not(:disabled) {
+            transform: translateY(8px);
+            box-shadow: 0 2px 0 #b2102f, 0 5px 10px rgba(0,0,0,0.5) !important;
+        }
+        .buzzer:disabled {
+            cursor: not-allowed;
+            transform: none !important;
+            color: #aaa;
+        }
+
+        .panel { background: #202024; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .btn-reset { background: #00e676; color: #121214; font-weight: bold; cursor: pointer; }
+        .btn-choice { background: #2979ff; color: white; font-weight: bold; cursor: pointer; }
+        .result { font-size: 24px; margin-top: 20px; padding: 15px; border-radius: 8px; background: #29292e; min-height: 35px;}
+        .winner { color: #00e676; font-weight: bold; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <!-- PASEK DIAGNOSTYCZNY -->
+    <div id="network-status">🟡 Łączenie z siecią teleturnieju...</div>
+
+    <div class="container">
+        <!-- EKRAN WYBORU ROLI -->
+        <div id="role-view" class="panel">
+            <h1>Kim jesteś?</h1>
+            <button id="choose-admin" class="btn-choice" style="background: #ef6c00;">Prowadzącym (Komputer)</button>
+            <button id="choose-player" class="btn-choice">Graczem (Telefon)</button>
+        </div>
+
+        <!-- SEKCJA GRACZA -->
+        <div id="player-view" class="hidden">
+            <h1 id="player-title">Dołącz do gry</h1>
+            <div id="login-form">
+                <input type="text" id="player-name" placeholder="Wpisz swoje imię..." maxlength="15">
+                <button id="btn-join" class="btn-choice">Zapisz imię</button>
+            </div>
+            
+            <button id="buzzer-btn" class="buzzer hidden" disabled>CZEKAJ</button>
+            <p id="player-status" style="margin-top: 15px; font-size: 20px; color: #aaa;">Wpisz imię, aby zobaczyć przycisk.</p>
+        </div>
+
+        <!-- SEKCJA PROWADZĄCEGO -->
+        <div id="admin-view" class="hidden" class="panel">
+            <h1>Panel Prowadzącego</h1>
+            <button id="btn-reset" class="btn-reset">RESET / NOWE PYTANIE</button>
+            <div class="result">
+                <span id="admin-status">Kliknij RESET, aby aktywować telefony.</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Klient PubNub -->
+    <script src="https://cdn.pubnub.com/sdk/javascript/pubnub.7.2.2.min.js"></script>
+    <script>
+        // Stały kanał dla wszystkich urządzeń
+        const channelName = "teleturniej_wspolny_kanal_glowny"; 
+        
+        const pubnub = new PubNub({
+            publishKey: 'pub-c-80695071-f925-4676-963c-a96d19114389',
+            subscribeKey: 'sub-c-115f03d2-ff14-41d3-9fbc-8cf0c0ef492d',
+            userId: "user_" + Math.random().toString(36).substring(2, 9)
+        });
+
+        const roleView = document.getElementById("role-view");
+        const playerView = document.getElementById("player-view");
+        const adminView = document.getElementById("admin-view");
+        const netStatus = document.getElementById("network-status");
+        
+        let myName = "";
+        let startTime = 0;
+        let rundaAktywna = false;
+        let ktosWygral = false;
+
+        // Sprawdzanie stanu sieci
+        pubnub.addListener({
+            status: function(statusEvent) {
+                if (statusEvent.category === "PNConnectedCategory") {
+                    netStatus.innerHTML = "🟢 Połączono z siecią teleturnieju";
+                    netStatus.style.color = "#00e676";
+                } else if (statusEvent.error) {
+                    netStatus.innerHTML = "🔴 Błąd połączenia z siecią";
+                    netStatus.style.color = "#ff1744";
+                }
+            }
+        });
+
+        document.getElementById("choose-admin").addEventListener("click", () => {
+            roleView.classList.add("hidden");
+            adminView.classList.remove("hidden");
+            setupAdmin();
+        });
+
+        document.getElementById("choose-player").addEventListener("click", () => {
+            roleView.classList.add("hidden");
+            playerView.classList.remove("hidden");
+            setupPlayer();
+        });
+
+        function setupPlayer() {
+            const nameInput = document.getElementById("player-name");
+            const btnJoin = document.getElementById("btn-join");
+            const buzzerBtn = document.getElementById("buzzer-btn");
+            const playerStatus = document.getElementById("player-status");
+            const loginForm = document.getElementById("login-form");
+
+            btnJoin.addEventListener("click", () => {
+                if(nameInput.value.trim() !== "") {
+                    myName = nameInput.value.trim();
+                    loginForm.classList.add("hidden");
+                    buzzerBtn.classList.remove("hidden");
+                    document.getElementById("player-title").innerText = `Gracz: ${myName}`;
+                    playerStatus.innerText = "Czekaj na rozpoczęcie rundy przez prowadzącego...";
+                }
+            });
+
+            const pressBuzzer = (e) => {
+                e.preventDefault();
+                if (!rundaAktywna || ktosWygral) return;
+
+                const clickTime = Date.now();
+                const roznica = ((clickTime - startTime) / 1000).toFixed(3);
+
+                pubnub.publish({
+                    channel: channelName,
+                    message: { akcja: "klik", gracz: myName, czas: roznica }
+                });
+            };
+
+            buzzerBtn.addEventListener("mousedown", pressBuzzer);
+            buzzerBtn.addEventListener("touchstart", pressBuzzer);
+
+            pubnub.addListener({
+                message: function(sygnal) {
+                    const m = sygnal.message;
+                    
+                    if (m.akcja === "reset") {
+                        startTime = m.time;
+                        rundaAktywna = true;
+                        ktosWygral = false;
+                        buzzerBtn.disabled = false;
+                        buzzerBtn.innerText = "KLIK!";
+                        buzzerBtn.classList.add("active-now");
+                        playerStatus.innerText = "ODPOWIADAJ! KTO PIERWSZY?!";
+                    }
+                    
+                    if (m.akcja === "koniec") {
+                        rundaAktywna = false;
+                        ktosWygral = true;
+                        buzzerBtn.disabled = true;
+                        buzzerBtn.classList.remove("active-now");
+                        buzzerBtn.innerText = "KONIEC";
+                        
+                        if (m.zwyciezca === myName) {
+                            playerStatus.innerHTML = `<span style="color: #00e676; font-weight: bold; font-size: 24px;">BYŁEŚ PIERWSZY! 🎉<br>Czas: ${m.czas}s</span>`;
+                        } else {
+                            playerStatus.innerText = `Ubiegł Cię: ${m.zwyciezca} (${m.czas}s)`;
+                        }
+                    }
+                }
+            });
+
+            pubnub.subscribe({ channels: [channelName] });
+        }
+
+        function setupAdmin() {
+            const btnReset = document.getElementById("btn-reset");
+            const adminStatus = document.getElementById("admin-status");
+            let rundaZablokowana = false;
+
+            btnReset.addEventListener("click", () => {
+                rundaZablokowana = false;
+                pubnub.publish({
+                    channel: channelName,
+                    message: { akcja: "reset", time: Date.now() }
+                });
+                adminStatus.innerHTML = `<span style="color: #00e676;">Pytanie w grze...</span><br>Telefony czekają na kliknięcie!`;
+            });
+
+            pubnub.addListener({
+                message: function(sygnal) {
+                    const m = sygnal.message;
+                    if (m.akcja === "klik" && !rundaZablokowana) {
+                        rundaZablokowana = true;
+                        
+                        pubnub.publish({
+                            channel: channelName,
+                            message: { akcja: "koniec", zwyciezca: m.gracz, czas: m.czas }
+                        });
+
+                        adminStatus.innerHTML = `Wygrał: <span style="font-size: 30px; color: #ff1744; font-weight:bold;">${m.gracz}</span><br><br>Czas reakcji: <strong>${m.czas}</strong> sekund!`;
+                    }
+                }
+            });
+
+            pubnub.subscribe({ channels: [channelName] });
+        }
+    </script>
+</body>
+</html>
